@@ -45,6 +45,10 @@ const (
 	reconnectMultiplier = 2.0
 )
 
+// AuthEventHandler is a callback for forwarding auth events (QR codes, URLs)
+// to the user frontend via Supabase.
+type AuthEventHandler func(serviceName, authMethod, data, message string)
+
 // WhatsAppNativeChannel implements the WhatsApp channel using whatsmeow (in-process, no external bridge).
 type WhatsAppNativeChannel struct {
 	*channels.BaseChannel
@@ -59,6 +63,7 @@ type WhatsAppNativeChannel struct {
 	reconnecting bool
 	stopping     atomic.Bool    // set once Stop begins; prevents new wg.Add calls
 	wg           sync.WaitGroup // tracks background goroutines (QR handler, reconnect)
+	onAuthEvent  AuthEventHandler
 }
 
 // NewWhatsAppNativeChannel creates a WhatsApp channel that uses whatsmeow for connection.
@@ -78,6 +83,11 @@ func NewWhatsAppNativeChannel(
 		storePath:   storePath,
 	}
 	return c, nil
+}
+
+// SetAuthEventHandler sets a callback for forwarding auth events (QR codes) to the user.
+func (c *WhatsAppNativeChannel) SetAuthEventHandler(handler AuthEventHandler) {
+	c.onAuthEvent = handler
 }
 
 func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
@@ -192,6 +202,12 @@ func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
 							Writer:     os.Stdout,
 							HalfBlocks: true,
 						})
+						// Forward QR data to the frontend via auth event handler
+						if c.onAuthEvent != nil {
+							c.onAuthEvent("whatsapp", "qr_code", evt.Code, "Scan this QR code with WhatsApp (Linked Devices)")
+						}
+						// Also emit structured event to stderr for the launcher to capture
+						fmt.Fprintf(os.Stderr, "PICOCLAW_AUTH_EVENT:{\"server_name\":\"whatsapp\",\"event_type\":\"qr_code\",\"qr_data\":%q,\"message\":\"Scan this QR code with WhatsApp (Linked Devices)\"}\n", evt.Code)
 					} else {
 						logger.InfoCF("whatsapp", "WhatsApp login event", map[string]any{"event": evt.Event})
 					}

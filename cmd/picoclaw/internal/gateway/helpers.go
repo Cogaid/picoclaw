@@ -477,7 +477,9 @@ func restartServices(
 	services.HealthServer = health.NewServer(cfg.Gateway.Host, cfg.Gateway.Port)
 	services.ChannelManager.SetupHTTPServer(addr, services.HealthServer)
 
-	if err := services.ChannelManager.StartAll(ctx); err != nil {
+	// Use context.Background() so the dispatch goroutines outlive this function's
+	// timeout context, matching the initial startup path (line 241).
+	if err := services.ChannelManager.StartAll(context.Background()); err != nil {
 		return fmt.Errorf("error restarting channels: %w", err)
 	}
 	fmt.Printf(

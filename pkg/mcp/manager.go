@@ -3,8 +3,10 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -107,16 +110,47 @@ type ServerConnection struct {
 
 // Manager manages multiple MCP server connections
 type Manager struct {
-	servers map[string]*ServerConnection
-	mu      sync.RWMutex
-	closed  atomic.Bool    // changed from bool to atomic.Bool to avoid TOCTOU race
-	wg      sync.WaitGroup // tracks in-flight CallTool calls
+	servers     map[string]*ServerConnection
+	mu          sync.RWMutex
+	closed      atomic.Bool    // changed from bool to atomic.Bool to avoid TOCTOU race
+	wg          sync.WaitGroup // tracks in-flight CallTool calls
+	onAuthEvent AuthEventHandler
 }
 
 // NewManager creates a new MCP manager
 func NewManager() *Manager {
 	return &Manager{
 		servers: make(map[string]*ServerConnection),
+	}
+}
+
+// extractURL finds the first http/https URL in a string.
+func extractURL(s string) string {
+	for _, prefix := range []string{"https://", "http://"} {
+		idx := strings.Index(s, prefix)
+		if idx == -1 {
+			continue
+		}
+		// Find end of URL (space, quote, or end of string)
+		end := idx
+		for end < len(s) && s[end] != ' ' && s[end] != '"' && s[end] != '\'' && s[end] != '>' && s[end] != ')' {
+			end++
+		}
+		return s[idx:end]
+	}
+	return ""
+}
+
+// SetAuthEventHandler sets a callback that is invoked when an MCP server
+// requires user authentication (e.g., OAuth URL, QR code).
+func (m *Manager) SetAuthEventHandler(handler AuthEventHandler) {
+	m.onAuthEvent = handler
+}
+
+// emitAuthEvent fires the auth event handler if one is set.
+func (m *Manager) emitAuthEvent(event AuthEvent) {
+	if m.onAuthEvent != nil {
+		m.onAuthEvent(event)
 	}
 }
 
@@ -355,7 +389,102 @@ func (m *Manager) ConnectServer(
 		}
 		cmd.Env = env
 
+		// Capture stderr to detect auth URLs from tools like mcp-remote.
+		// The MCP SDK only uses stdin/stdout for the protocol; stderr is
+		// where tools print auth prompts, errors, and debug info.
+		stderrPipe, pipeErr := cmd.StderrPipe()
+		if pipeErr != nil {
+			logger.WarnCF("mcp", "Could not create stderr pipe, auth detection disabled",
+				map[string]any{"server": name, "error": pipeErr.Error()})
+		}
+
 		transport = &mcp.CommandTransport{Command: cmd}
+
+		// If we got a stderr pipe, start a goroutine to scan it for auth URLs.
+		// Only emits a single event for the real OAuth URL (with PKCE rewriting).
+		if pipeErr == nil && stderrPipe != nil {
+			go func(serverName string, serverCfg config.MCPServerConfig) {
+				authEmitted := false // Only emit one auth event per server
+				lineCount := 0
+				scanner := bufio.NewScanner(stderrPipe)
+				logger.InfoCF("mcp", "Started stderr scanner for server",
+					map[string]any{"server": serverName})
+				for scanner.Scan() {
+					line := scanner.Text()
+					lineCount++
+					// Log all stderr lines at INFO for debugging auth URL detection
+					logger.InfoCF("mcp", "Server stderr line",
+						map[string]any{"server": serverName, "line_num": lineCount, "line": line})
+
+					if authEmitted {
+						continue // Already found the OAuth URL for this server
+					}
+
+					// Extract any URL from the line
+					rawURL := extractURL(line)
+					if rawURL == "" {
+						continue
+					}
+
+					logger.InfoCF("mcp", "Extracted URL from stderr",
+						map[string]any{"server": serverName, "url": rawURL, "is_oauth": IsOAuthURL(rawURL)})
+
+					// Only process real OAuth URLs (skip localhost, base domains, etc.)
+					if !IsOAuthURL(rawURL) {
+						logger.InfoCF("mcp", "Skipping non-OAuth URL from stderr",
+							map[string]any{"server": serverName, "url": rawURL})
+						continue
+					}
+
+					logger.InfoCF("mcp", "OAuth URL detected from server stderr",
+						map[string]any{"server": serverName, "url": rawURL})
+
+					// Determine the callback URL
+					callbackURL := serverCfg.CallbackURL
+					if callbackURL == "" {
+						callbackURL = os.Getenv("PICOCLAW_OAUTH_CALLBACK_URL")
+					}
+					if callbackURL == "" {
+						callbackURL = "https://makersfuel.com/api/auth/tool-callback"
+					}
+
+					// Generate a flow ID for the state parameter
+					flowID := fmt.Sprintf("mcp-%s-%d", serverName, time.Now().UnixMilli())
+
+					// Rewrite the OAuth URL with our callback and new PKCE
+					rewrittenURL, codeVerifier, oauthMeta, rewriteErr := RewriteOAuthURL(rawURL, callbackURL, flowID)
+					if rewriteErr != nil {
+						logger.WarnCF("mcp", "Failed to rewrite OAuth URL, using original",
+							map[string]any{"server": serverName, "error": rewriteErr.Error()})
+						// Fall back to emitting the original URL
+						m.emitAuthEvent(AuthEvent{
+							ServerName: serverName,
+							EventType:  AuthEventURL,
+							URL:        rawURL,
+							Message:    fmt.Sprintf("MCP server %q requires authorization", serverName),
+							Timestamp:  time.Now(),
+						})
+					} else {
+						logger.InfoCF("mcp", "OAuth URL rewritten with our callback",
+							map[string]any{
+								"server":       serverName,
+								"callback_url": callbackURL,
+								"has_verifier": codeVerifier != "",
+							})
+						m.emitAuthEvent(AuthEvent{
+							ServerName:   serverName,
+							EventType:    AuthEventURL,
+							URL:          rewrittenURL,
+							CodeVerifier: codeVerifier,
+							OAuthMeta:    oauthMeta,
+							Message:      fmt.Sprintf("MCP server %q requires authorization", serverName),
+							Timestamp:    time.Now(),
+						})
+					}
+					authEmitted = true
+				}
+			}(name, cfg)
+		}
 	default:
 		return fmt.Errorf(
 			"unsupported transport type: %s (supported: stdio, sse, http)",
@@ -366,6 +495,18 @@ func (m *Manager) ConnectServer(
 	// Connect to server
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
+		// Check if the error indicates an authentication requirement
+		errStr := err.Error()
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
+			strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "Unauthorized") ||
+			strings.Contains(errStr, "authentication required") {
+			m.emitAuthEvent(AuthEvent{
+				ServerName: name,
+				EventType:  AuthEventError,
+				Message:    fmt.Sprintf("MCP server %q requires authentication: %s", name, errStr),
+				Timestamp:  time.Now(),
+			})
+		}
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
@@ -470,6 +611,18 @@ func (m *Manager) CallTool(
 
 	result, err := conn.Session.CallTool(ctx, params)
 	if err != nil {
+		// Check if the tool call failed due to authentication
+		errStr := err.Error()
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
+			strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "Unauthorized") ||
+			strings.Contains(errStr, "authentication required") || strings.Contains(errStr, "token expired") {
+			m.emitAuthEvent(AuthEvent{
+				ServerName: serverName,
+				EventType:  AuthEventError,
+				Message:    fmt.Sprintf("Tool %q on server %q requires authentication: %s", toolName, serverName, errStr),
+				Timestamp:  time.Now(),
+			})
+		}
 		return nil, fmt.Errorf("failed to call tool: %w", err)
 	}
 
@@ -515,6 +668,177 @@ func (m *Manager) Close() error {
 	}
 
 	return nil
+}
+
+// ConnectWithToken connects to an MCP server via SSE transport using
+// a Bearer token for authentication. This bypasses mcp-remote entirely
+// and connects directly to the MCP server's SSE/HTTP endpoint.
+func (m *Manager) ConnectWithToken(
+	ctx context.Context,
+	name string,
+	serverURL string,
+	token string,
+) error {
+	logger.InfoCF("mcp", "Connecting to MCP server with token (SSE direct)",
+		map[string]any{"server": name, "url": serverURL})
+
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "picoclaw",
+		Version: "1.0.0",
+	}, nil)
+
+	sseTransport := &mcp.StreamableClientTransport{
+		Endpoint: serverURL,
+		HTTPClient: &http.Client{
+			Transport: &headerTransport{
+				base: http.DefaultTransport,
+				headers: map[string]string{
+					"Authorization": "Bearer " + token,
+				},
+			},
+		},
+	}
+
+	session, err := client.Connect(ctx, sseTransport, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect with token: %w", err)
+	}
+
+	initResult := session.InitializeResult()
+	logger.InfoCF("mcp", "Connected to MCP server with token",
+		map[string]any{
+			"server":        name,
+			"serverName":    initResult.ServerInfo.Name,
+			"serverVersion": initResult.ServerInfo.Version,
+		})
+
+	// List tools
+	var tools []*mcp.Tool
+	if initResult.Capabilities.Tools != nil {
+		for tool, err := range session.Tools(ctx, nil) {
+			if err != nil {
+				logger.WarnCF("mcp", "Error listing tool",
+					map[string]any{"server": name, "error": err.Error()})
+				continue
+			}
+			tools = append(tools, tool)
+		}
+		logger.InfoCF("mcp", "Listed tools from authenticated MCP server",
+			map[string]any{"server": name, "toolCount": len(tools)})
+	}
+
+	// Store connection (replace any existing one)
+	m.mu.Lock()
+	if existing, ok := m.servers[name]; ok {
+		_ = existing.Session.Close()
+	}
+	m.servers[name] = &ServerConnection{
+		Name:    name,
+		Client:  client,
+		Session: session,
+		Tools:   tools,
+	}
+	m.mu.Unlock()
+
+	return nil
+}
+
+// PollForTokenAndReconnect starts a background goroutine that polls
+// the makersclaw-api for completed auth tokens. When a token is received,
+// it connects to the MCP server directly via SSE with the token.
+//
+// apiBaseURL is the makersclaw-api URL (e.g., "http://localhost:8000")
+// instanceID is the employee instance UUID
+// serverURL is the MCP server's SSE endpoint URL
+func (m *Manager) PollForTokenAndReconnect(
+	ctx context.Context,
+	serverName string,
+	serverURL string,
+	apiBaseURL string,
+	instanceID string,
+) {
+	go func() {
+		pollInterval := 5 * time.Second
+		timeout := 5 * time.Minute
+		deadline := time.Now().Add(timeout)
+
+		logger.InfoCF("mcp", "Starting token poll for MCP server",
+			map[string]any{
+				"server":      serverName,
+				"api_base":    apiBaseURL,
+				"instance_id": instanceID,
+				"timeout":     timeout.String(),
+			})
+
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				logger.InfoCF("mcp", "Token poll cancelled", map[string]any{"server": serverName})
+				return
+			case <-time.After(pollInterval):
+			}
+
+			// Poll the API for tokens
+			url := fmt.Sprintf("%s/v1/auth-flows/%s/tokens?service_name=%s",
+				apiBaseURL, instanceID, serverName)
+
+			resp, err := http.Get(url)
+			if err != nil {
+				logger.DebugCF("mcp", "Token poll request failed",
+					map[string]any{"server": serverName, "error": err.Error()})
+				continue
+			}
+
+			if resp.StatusCode == 404 {
+				resp.Body.Close()
+				continue // No flow yet
+			}
+
+			if resp.StatusCode != 200 {
+				resp.Body.Close()
+				continue
+			}
+
+			// Parse response
+			var tokenResp struct {
+				Status      string `json:"status"`
+				AccessToken string `json:"access_token"`
+			}
+
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				continue
+			}
+
+			if err := json.Unmarshal(body, &tokenResp); err != nil {
+				logger.DebugCF("mcp", "Token poll parse error",
+					map[string]any{"server": serverName, "error": err.Error()})
+				continue
+			}
+
+			if tokenResp.Status != "completed" || tokenResp.AccessToken == "" {
+				continue
+			}
+
+			accessToken := tokenResp.AccessToken
+
+			logger.InfoCF("mcp", "Received auth token, reconnecting MCP server",
+				map[string]any{"server": serverName})
+
+			if err := m.ConnectWithToken(ctx, serverName, serverURL, accessToken); err != nil {
+				logger.ErrorCF("mcp", "Failed to reconnect with token",
+					map[string]any{"server": serverName, "error": err.Error()})
+			} else {
+				logger.InfoCF("mcp", "Successfully reconnected MCP server with auth token",
+					map[string]any{"server": serverName})
+			}
+			return
+		}
+
+		logger.WarnCF("mcp", "Token poll timed out",
+			map[string]any{"server": serverName, "timeout": timeout.String()})
+	}()
 }
 
 // GetAllTools returns all tools from all connected servers

@@ -17,15 +17,20 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
+// AuthEventHandler is a callback for forwarding auth events (QR codes, URLs)
+// to the user frontend via Supabase.
+type AuthEventHandler func(serviceName, authMethod, data, message string)
+
 type WhatsAppChannel struct {
 	*channels.BaseChannel
-	conn      *websocket.Conn
-	config    config.WhatsAppConfig
-	url       string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	connected bool
+	conn        *websocket.Conn
+	config      config.WhatsAppConfig
+	url         string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	connected   bool
+	onAuthEvent AuthEventHandler
 }
 
 func NewWhatsAppChannel(cfg config.WhatsAppConfig, bus *bus.MessageBus) (*WhatsAppChannel, error) {
@@ -44,6 +49,11 @@ func NewWhatsAppChannel(cfg config.WhatsAppConfig, bus *bus.MessageBus) (*WhatsA
 		url:         cfg.BridgeURL,
 		connected:   false,
 	}, nil
+}
+
+// SetAuthEventHandler sets a callback for forwarding auth events to the user.
+func (c *WhatsAppChannel) SetAuthEventHandler(handler AuthEventHandler) {
+	c.onAuthEvent = handler
 }
 
 func (c *WhatsAppChannel) Start(ctx context.Context) error {
@@ -181,8 +191,25 @@ func (c *WhatsAppChannel) listen() {
 				continue
 			}
 
-			if msgType == "message" {
+			switch msgType {
+			case "message":
 				c.handleIncomingMessage(msg)
+			case "qr":
+				// WhatsApp bridge sends QR code for authentication
+				if qrData, ok := msg["qr_data"].(string); ok && c.onAuthEvent != nil {
+					logger.InfoC("whatsapp", "Received QR code for WhatsApp authentication")
+					c.onAuthEvent("whatsapp", "qr_code", qrData, "Scan this QR code with WhatsApp on your phone to connect")
+				}
+			case "auth_url":
+				// Some bridges send an auth URL instead of QR
+				if authURL, ok := msg["url"].(string); ok && c.onAuthEvent != nil {
+					authMsg, _ := msg["message"].(string)
+					if authMsg == "" {
+						authMsg = "Visit this URL to authenticate WhatsApp"
+					}
+					logger.InfoC("whatsapp", "Received auth URL for WhatsApp authentication")
+					c.onAuthEvent("whatsapp", "oauth_url", authURL, authMsg)
+				}
 			}
 		}
 	}

@@ -8,7 +8,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -81,6 +83,25 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 
 	al.mcp.initOnce.Do(func() {
 		mcpManager := mcp.NewManager()
+
+		// Wire up auth event handler: emit structured JSON to stderr
+		// so the launcher process (web backend) can capture and broadcast it,
+		// or the agent can write directly to Supabase.
+		mcpManager.SetAuthEventHandler(func(event mcp.AuthEvent) {
+			data, err := json.Marshal(event)
+			if err != nil {
+				logger.ErrorCF("agent", "Failed to marshal auth event", map[string]any{
+					"error": err.Error(),
+				})
+				return
+			}
+			// Emit to stderr with a known prefix for the launcher to detect
+			fmt.Fprintf(os.Stderr, "PICOCLAW_AUTH_EVENT:%s\n", data)
+			logger.InfoCF("agent", "Auth event emitted", map[string]any{
+				"server":     event.ServerName,
+				"event_type": string(event.EventType),
+			})
+		})
 
 		defaultAgent := al.registry.GetDefaultAgent()
 		workspacePath := al.cfg.WorkspacePath()
