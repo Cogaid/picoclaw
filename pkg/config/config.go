@@ -1340,6 +1340,12 @@ type MCPServerConfig struct {
 	URL string `json:"url,omitempty"`
 	// Headers are HTTP headers to send with requests (sse/http only)
 	Headers map[string]string `json:"headers,omitempty"`
+	// AuthRequired indicates this server needs user authentication before use
+	AuthRequired bool `json:"auth_required,omitempty"`
+	// AuthType specifies the authentication method: "oauth", "qr", "token", "api_key"
+	AuthType string `json:"auth_type,omitempty"`
+	// CallbackURL is the OAuth callback URL for this server
+	CallbackURL string `json:"callback_url,omitempty"`
 }
 
 // MCPConfig defines configuration for all MCP servers
