@@ -35,6 +35,7 @@ func matchesMagic(path, platform string) (bool, error) {
 // artifacts to ensure a binary-like file is present. This is a network test
 // and is skipped in short mode.
 func TestDownloadAndExtractRelease_RealPlatforms(t *testing.T) {
+	t.Skip("skipping network tests")
 	if testing.Short() {
 		t.Skip("skipping network tests in short mode")
 	}

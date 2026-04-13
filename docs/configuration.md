@@ -595,7 +595,7 @@ chmod 600 ~/.picoclaw/.security.yml
   "channel_list": {
     "telegram": {
       "enabled": true,
-      "type": "telegram""
+      "type": "telegram",
       // token loaded from .security.yml
     }
   }
@@ -911,7 +911,7 @@ This keeps the runtime lightweight while making new OpenAI-compatible backends m
   "channel_list": {
     "telegram": {
       "enabled": true,
-      "type": "telegram""
+      "type": "telegram",
       // token: set in .security.yml
       "allow_from": ["123456789"]
     }

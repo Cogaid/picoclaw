@@ -36,35 +36,59 @@ func hiddenValues(key string, value map[string]any, ch *config.Channel) {
 	}
 	switch key {
 	case "pico":
-		value["token"] = v.(*config.PicoSettings).Token.String()
+		if settings, ok := v.(*config.PicoSettings); ok {
+			value["token"] = settings.Token.String()
+		}
 	case "telegram":
-		value["token"] = v.(*config.TelegramSettings).Token.String()
+		if settings, ok := v.(*config.TelegramSettings); ok {
+			value["token"] = settings.Token.String()
+		}
 	case "discord":
-		value["token"] = v.(*config.DiscordSettings).Token.String()
+		if settings, ok := v.(*config.DiscordSettings); ok {
+			value["token"] = settings.Token.String()
+		}
 	case "slack":
-		value["bot_token"] = v.(*config.SlackSettings).BotToken.String()
-		value["app_token"] = v.(*config.SlackSettings).AppToken.String()
+		if settings, ok := v.(*config.SlackSettings); ok {
+			value["bot_token"] = settings.BotToken.String()
+			value["app_token"] = settings.AppToken.String()
+		}
 	case "matrix":
-		value["token"] = v.(*config.MatrixSettings).AccessToken.String()
+		if settings, ok := v.(*config.MatrixSettings); ok {
+			value["token"] = settings.AccessToken.String()
+		}
 	case "onebot":
-		value["token"] = v.(*config.OneBotSettings).AccessToken.String()
+		if settings, ok := v.(*config.OneBotSettings); ok {
+			value["token"] = settings.AccessToken.String()
+		}
 	case "line":
-		value["token"] = v.(*config.LINESettings).ChannelAccessToken.String()
-		value["secret"] = v.(*config.LINESettings).ChannelSecret.String()
+		if settings, ok := v.(*config.LINESettings); ok {
+			value["token"] = settings.ChannelAccessToken.String()
+			value["secret"] = settings.ChannelSecret.String()
+		}
 	case "wecom":
-		value["secret"] = v.(*config.WeComSettings).Secret.String()
+		if settings, ok := v.(*config.WeComSettings); ok {
+			value["secret"] = settings.Secret.String()
+		}
 	case "dingtalk":
-		value["secret"] = v.(*config.DingTalkSettings).ClientSecret.String()
+		if settings, ok := v.(*config.DingTalkSettings); ok {
+			value["secret"] = settings.ClientSecret.String()
+		}
 	case "qq":
-		value["secret"] = v.(*config.QQSettings).AppSecret.String()
+		if settings, ok := v.(*config.QQSettings); ok {
+			value["secret"] = settings.AppSecret.String()
+		}
 	case "irc":
-		value["password"] = v.(*config.IRCSettings).Password.String()
-		value["serv_password"] = v.(*config.IRCSettings).NickServPassword.String()
-		value["sasl_password"] = v.(*config.IRCSettings).SASLPassword.String()
+		if settings, ok := v.(*config.IRCSettings); ok {
+			value["password"] = settings.Password.String()
+			value["serv_password"] = settings.NickServPassword.String()
+			value["sasl_password"] = settings.SASLPassword.String()
+		}
 	case "feishu":
-		value["app_secret"] = v.(*config.FeishuSettings).AppSecret.String()
-		value["encrypt_key"] = v.(*config.FeishuSettings).EncryptKey.String()
-		value["verification_token"] = v.(*config.FeishuSettings).VerificationToken.String()
+		if settings, ok := v.(*config.FeishuSettings); ok {
+			value["app_secret"] = settings.AppSecret.String()
+			value["encrypt_key"] = settings.EncryptKey.String()
+			value["verification_token"] = settings.VerificationToken.String()
+		}
 	case "teams_webhook":
 		// Expose webhook URLs for hash computation (they contain secrets)
 		vv := value["webhooks"]
@@ -72,9 +96,10 @@ func hiddenValues(key string, value map[string]any, ch *config.Channel) {
 		if vv != nil {
 			webhooks = vv.(map[string]string)
 		}
-		ts := v.(*config.TeamsWebhookSettings)
-		for name, target := range ts.Webhooks {
-			webhooks[name] = target.WebhookURL.String()
+		if settings, ok := v.(*config.TeamsWebhookSettings); ok {
+			for name, target := range settings.Webhooks {
+				webhooks[name] = target.WebhookURL.String()
+			}
 		}
 		value["webhooks"] = webhooks
 	}

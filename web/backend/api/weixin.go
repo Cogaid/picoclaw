@@ -220,6 +220,9 @@ func (h *Handler) saveWeixinBinding(token, accountID string) error {
 
 	var weixinCfg config.WeixinSettings
 	if err := bc.Decode(&weixinCfg); err != nil {
+		logger.ErrorCF("weixin", "failed to decode weixin settings", map[string]any{
+			"error": err.Error(),
+		})
 		return fmt.Errorf("decode weixin settings: %w", err)
 	}
 	weixinCfg.Token = *config.NewSecureString(token)
