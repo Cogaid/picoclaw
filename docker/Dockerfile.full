@@ -37,6 +37,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
 
+# Copy the canonical original SOUL.md to a non-PVC path so the init
+# container can prepend it to the per-employee Role prompt when first
+# writing the workspace SOUL.md.
+COPY workspace/SOUL.md /opt/picoclaw/SOUL.md.original
+
 # Create picoclaw home directory
 RUN /usr/local/bin/picoclaw onboard
 
